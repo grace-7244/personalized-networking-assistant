@@ -1,98 +1,106 @@
 # app/services/fact_checker.py
 
-"""
-fact_checker.py
-Retrieves and summarizes factual references from the Wikipedia API.
-Uses the wikipedia Python wrapper to search and return article summaries.
-"""
-
-import wikipedia
-from wikipedia.exceptions import DisambiguationError, PageError, WikipediaException
-
+import requests
 from app.config import settings
 
-# Set language from config
-wikipedia.set_lang(settings.WIKIPEDIA_LANG)
+WIKIPEDIA_API_URL = "https://en.wikipedia.org/api/rest_v1/page/summary/"
+WIKIPEDIA_SEARCH_URL = "https://en.wikipedia.org/w/api.php"
+
+
+def _search_wikipedia(query: str) -> list:
+    """Search Wikipedia and return list of matching page titles."""
+    try:
+        params = {
+            "action": "opensearch",
+            "search": query,
+            "limit": 3,
+            "namespace": 0,
+            "format": "json",
+        }
+        response = requests.get(
+            WIKIPEDIA_SEARCH_URL,
+            params=params,
+            timeout=10,
+            headers={"User-Agent": "PersonalizedNetworkingAssistant/1.0"}
+        )
+        response.raise_for_status()
+        data = response.json()
+        return data[1] if len(data) > 1 else []
+    except Exception:
+        return []
+
+
+def _get_page_summary(title: str) -> str | None:
+    """Get summary for a specific Wikipedia page title."""
+    try:
+        url = WIKIPEDIA_API_URL + requests.utils.quote(title)
+        response = requests.get(
+            url,
+            timeout=10,
+            headers={"User-Agent": "PersonalizedNetworkingAssistant/1.0"}
+        )
+        response.raise_for_status()
+        data = response.json()
+
+        if data.get("type") == "disambiguation":
+            return None
+
+        extract = data.get("extract", "").strip()
+        if extract and len(extract) > 50:
+            # Return first 3 sentences
+            sentences = [s.strip() for s in extract.split(". ") if s.strip()]
+            return ". ".join(sentences[:3]) + "."
+        return None
+    except Exception:
+        return None
 
 
 def fact_check(query: str) -> str:
     """
     Accept a query string and return a summarized fact-check result
-    from the Wikipedia API.
-
-    Args:
-        query: the topic or claim to look up.
-
-    Returns:
-        A plain-text summary string, or a human-readable error message.
+    from the Wikipedia REST API using requests.
     """
-    # Handle empty / None queries
     if not query or not query.strip():
         return "No query provided, so no fact check could be performed."
 
     query = query.strip()
+    words = query.split()
+    meaningful_words = [w for w in words if len(w) > 4]
 
-    try:
-        summary = wikipedia.summary(
-            query,
-            sentences=settings.WIKIPEDIA_SUMMARY_SENTENCES,
-            auto_suggest=True,
-            redirect=True,
-        )
-        return summary.strip()
+    # Step 1: Search Wikipedia for the query
+    search_results = _search_wikipedia(query)
 
-    except DisambiguationError as e:
-        # Try each suggested option up to the configured limit
-        attempts = e.options[:settings.WIKIPEDIA_MAX_DISAMBIGUATION_ATTEMPTS]
-        for option in attempts:
-            try:
-                summary = wikipedia.summary(
-                    option,
-                    sentences=settings.WIKIPEDIA_SUMMARY_SENTENCES,
-                    auto_suggest=False,
-                    redirect=True,
-                )
-                return summary.strip()
-            except (WikipediaException, Exception):
-                continue
-        # All options failed
-        return (
-            f'"{query}" is ambiguous and could refer to multiple topics. '
-            f"Please be more specific."
-        )
+    if search_results:
+        for title in search_results:
+            summary = _get_page_summary(title)
+            if summary:
+                if title.lower() != query.lower():
+                    return f"Here is what Wikipedia says about '{title}':\n\n{summary}"
+                return summary
 
-    except PageError:
-        return (
-            f'No Wikipedia article was found for "{query}". '
-            f"Please try a different search term."
-        )
+    # Step 2: Try each meaningful keyword
+    for word in meaningful_words:
+        search_results = _search_wikipedia(word)
+        if search_results:
+            summary = _get_page_summary(search_results[0])
+            if summary:
+                return f"Here is what Wikipedia says about '{search_results[0]}':\n\n{summary}"
 
-    except WikipediaException:
-        return "Fact check is temporarily unavailable. Please try again shortly."
-
-    except Exception:
-        return "An unexpected error occurred while fact-checking this topic."
+    return (
+        f'No Wikipedia article could be found for "{query}". '
+        f"Please try a more specific search term."
+    )
 
 
 def get_page_url(query: str) -> str | None:
-    """
-    Return the Wikipedia URL for a given query, or None if not found.
-
-    Args:
-        query: the topic to look up.
-
-    Returns:
-        URL string or None.
-    """
+    """Return the Wikipedia URL for a given query, or None if not found."""
     if not query or not query.strip():
         return None
-
     try:
-        page = wikipedia.page(
-            query.strip(),
-            auto_suggest=True,
-            redirect=True,
-        )
-        return page.url
+        search_results = _search_wikipedia(query.strip())
+        if search_results:
+            title = requests.utils.quote(search_results[0].replace(" ", "_"))
+            return f"https://en.wikipedia.org/wiki/{title}"
+        return None
     except Exception:
         return None
